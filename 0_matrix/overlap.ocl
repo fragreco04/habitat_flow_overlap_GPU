@@ -1,0 +1,26 @@
+kernel void overlap_k(
+    global const float * restrict habitat,
+    global const float * restrict flow,
+    global int * restrict result,
+    const int cols,
+    const int rows
+) {
+    const int c = get_global_id(0);
+    const int r = get_global_id(1);
+
+    if (c < cols && r < rows) {
+        const int idx = r * cols + c;
+
+        int h_val = 0;
+        int f_val = 0;
+
+        if (habitat[idx] > 0.0f)
+            h_val = 1;
+        
+        if (flow[idx] > 0.0f)
+            f_val = 2;
+
+        result[idx] = h_val | f_val;      // 00: Nessuno attivo - 01: h attivo - 10: f attivo - 11: entrambi attivi
+    }
+}
+

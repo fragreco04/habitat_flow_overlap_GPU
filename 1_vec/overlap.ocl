@@ -1,0 +1,119 @@
+kernel void overlap_vec1_k(
+    global float const * restrict habitat,
+    global float const * restrict flow,
+    global char * restrict out,
+    const int nels
+) {
+    const int i = get_global_id(0);
+
+    if (i >= nels)
+        return;
+
+    int h_val = (habitat[i] > 0.0f) ? 1 : 0;
+    int f_val = (flow[i] > 0.0f) ? 2 : 0;
+
+    out[i] = h_val | f_val;
+}
+
+kernel void overlap_vec2_k(
+    global float2 const * restrict habitat,
+    global float2 const * restrict flow,
+    global char2 * restrict out,
+    const int nduos
+) {
+    const int i = get_global_id(0);
+
+    if (i >= nduos)
+        return;
+
+    float2 h = habitat[i];
+    float2 f = flow[i];
+
+    // Otteniamo 0000000  oppure FFFFFF
+    int2 h_mask = (h > 0.0f);
+    int2 f_mask = (f > 0.0f);
+
+    // Facciamo un AND
+    int2 h_val = h_mask & 1;
+    int2 f_val = f_mask & 2;
+
+    // Facciamo un OR
+    int2 res = h_val | f_val;
+
+    out[i] = convert_char2(res);
+}
+
+kernel void overlap_vec4_k(
+    global float4 const * restrict habitat,
+    global float4 const * restrict flow,
+    global char4 * restrict out,
+    const int nquads
+) {
+    const int i = get_global_id(0);
+
+    if (i >= nquads)
+        return;
+
+    float4 h = habitat[i];
+    float4 f = flow[i];
+
+    int4 h_mask = (h > 0.0f);
+    int4 f_mask = (f > 0.0f);
+
+    int4 h_val = h_mask & 1;
+    int4 f_val = f_mask & 2;
+
+    int4 res = h_val | f_val;
+
+    out[i] = convert_char4(res);
+}
+
+kernel void overlap_vec8_k(
+    global float8 const * restrict habitat,
+    global float8 const * restrict flow,
+    global char8 * restrict out,
+    const int neights
+) {
+    const int i = get_global_id(0);
+
+    if (i >= neights)
+        return;
+
+    float8 h = habitat[i];
+    float8 f = flow[i];
+
+    int8 h_mask = (h > 0.0f);
+    int8 f_mask = (f > 0.0f);
+
+    int8 h_val = h_mask & 1;
+    int8 f_val = f_mask & 2;
+
+    int8 res = h_val | f_val;
+
+    out[i] = convert_char8(res);
+}
+
+kernel void overlap_vec16_k(
+    global float16 const * restrict habitat,
+    global float16 const * restrict flow,
+    global char16 * restrict out,
+    const int neights
+) {
+    const int i = get_global_id(0);
+
+    if (i >= neights)
+        return;
+
+    float16 h = habitat[i];
+    float16 f = flow[i];
+
+    int16 h_mask = (h > 0.0f);
+    int16 f_mask = (f > 0.0f);
+
+    int16 h_val = h_mask & 1;
+    int16 f_val = f_mask & 2;
+
+    int16 res = h_val | f_val;
+
+    out[i] = convert_char16(res);
+}

@@ -1,0 +1,246 @@
+kernel void overlap_reduce_vec1_k(
+    global float const * restrict habitat,
+    global float const * restrict flow,
+    const int nels,
+    global uint * restrict g_total_h,
+    global uint * restrict g_total_overlap,
+    local uint *  restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid = get_global_id(0);
+    const int lid = get_local_id(0);
+    const int lws = get_local_size(0);
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid < nels) {
+        float h = habitat[gid];
+        float f = flow[gid];
+
+        bool h_active = (h > 0.0f);
+        bool f_active = (f > 0.0f);
+
+        my_h = h_active ? 1 : 0;
+        my_overlap = (h_active && f_active) ? 1 : 0;
+    }
+
+    l_h[lid] = my_h;
+    l_overlap[lid] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lws/2; stride > 0; stride >>=1) {
+        if (lid < stride) {
+            l_h[lid] += l_h[lid + stride];
+            l_overlap[lid] += l_overlap[lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        atomic_add(g_total_h, l_h[0]);
+        atomic_add(g_total_overlap, l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_vec2_k(
+    global float2 const * restrict habitat,
+    global float2 const * restrict flow,
+    const int nduos,
+    global uint * restrict g_total_h,
+    global uint * restrict g_total_overlap,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid = get_global_id(0);
+    const int lid = get_local_id(0);
+    const int lws = get_local_size(0);
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid < nduos) {
+        float2 h = habitat[gid];
+        float2 f = flow[gid];
+
+        int2 h_active = (h > 0.0f);
+        int2 f_active = (f > 0.0f);
+
+        // h_active vale -1 se vero, 0 se falso. (-h_active) vale 1 se vero.
+        int2 h_bits = -h_active;
+        int2 overlap_bits = -(h_active & f_active);
+
+        my_h = h_bits.x + h_bits.y ;
+        my_overlap = overlap_bits.x + overlap_bits.y;
+    }
+
+    l_h[lid] = my_h;
+    l_overlap[lid] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lws / 2; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            l_h[lid] += l_h[lid + stride];
+            l_overlap[lid] += l_overlap[lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        atomic_add(g_total_h, l_h[0]);
+        atomic_add(g_total_overlap, l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_vec4_k(
+    global float4 const * restrict habitat,
+    global float4 const * restrict flow,
+    const int nquads,
+    global uint * restrict g_total_h,
+    global uint * restrict g_total_overlap,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid = get_global_id(0);
+    const int lid = get_local_id(0);
+    const int lws = get_local_size(0);
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid < nquads) {
+        float4 h = habitat[gid];
+        float4 f = flow[gid];
+
+        int4 h_active = (h > 0.0f);
+        int4 f_active = (f > 0.0f);
+
+        // h_active vale -1 se vero, 0 se falso. (-h_active) vale 1 se vero.
+        int4 h_bits = -h_active;
+        int4 overlap_bits = -(h_active & f_active);
+
+        my_h = h_bits.x + h_bits.y + h_bits.z + h_bits.w;
+        my_overlap = overlap_bits.x + overlap_bits.y + overlap_bits.z + overlap_bits.w;
+    }
+
+    l_h[lid] = my_h;
+    l_overlap[lid] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lws / 2; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            l_h[lid] += l_h[lid + stride];
+            l_overlap[lid] += l_overlap[lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        atomic_add(g_total_h, l_h[0]);
+        atomic_add(g_total_overlap, l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_vec8_k(
+    global float8 const * restrict habitat,
+    global float8 const * restrict flow,
+    const int neights,
+    global uint * restrict g_total_h,
+    global uint * restrict g_total_overlap,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid = get_global_id(0);
+    const int lid = get_local_id(0);
+    const int lws = get_local_size(0);
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid < neights) {
+        float8 h = habitat[gid];
+        float8 f = flow[gid];
+
+        int8 h_active = (h > 0.0f);
+        int8 f_active = (f > 0.0f);
+
+        int8 h_bits = -h_active;
+        int8 overlap_bits = -(h_active & f_active);
+
+        my_h = h_bits.s0 + h_bits.s1 + h_bits.s2 + h_bits.s3 + h_bits.s4 + h_bits.s5 + h_bits.s6 + h_bits.s7;
+
+        my_overlap = overlap_bits.s0 + overlap_bits.s1 + overlap_bits.s2 + overlap_bits.s3 + overlap_bits.s4 + overlap_bits.s5 + overlap_bits.s6 + overlap_bits.s7;
+    }
+
+    l_h[lid] = my_h;
+    l_overlap[lid] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lws / 2; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            l_h[lid] += l_h[lid + stride];
+            l_overlap[lid] += l_overlap[lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        atomic_add(g_total_h, l_h[0]);
+        atomic_add(g_total_overlap, l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_vec16_k(
+    global float16 const * restrict habitat,
+    global float16 const * restrict flow,
+    const int nsixteens,
+    global uint * restrict g_total_h,
+    global uint * restrict g_total_overlap,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid = get_global_id(0);
+    const int lid = get_local_id(0);
+    const int lws = get_local_size(0);
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid < nsixteens) {
+        float16 h = habitat[gid];
+        float16 f = flow[gid];
+
+        int16 h_active = (h > 0.0f);
+        int16 f_active = (f > 0.0f);
+
+        int16 h_bits = -h_active;
+        int16 overlap_bits = -(h_active & f_active);
+
+        my_h = (h_bits.s0 + h_bits.s1 + h_bits.s2 + h_bits.s3) +
+               (h_bits.s4 + h_bits.s5 + h_bits.s6 + h_bits.s7) +
+               (h_bits.s8 + h_bits.s9 + h_bits.sa + h_bits.sb) +
+               (h_bits.sc + h_bits.sd + h_bits.se + h_bits.sf);
+
+        my_overlap = (overlap_bits.s0 + overlap_bits.s1 + overlap_bits.s2 + overlap_bits.s3) +
+                     (overlap_bits.s4 + overlap_bits.s5 + overlap_bits.s6 + overlap_bits.s7) +
+                     (overlap_bits.s8 + overlap_bits.s9 + overlap_bits.sa + overlap_bits.sb) +
+                     (overlap_bits.sc + overlap_bits.sd + overlap_bits.se + overlap_bits.sf);
+    }
+
+    l_h[lid] = my_h;
+    l_overlap[lid] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lws / 2; stride > 0; stride >>= 1) {
+        if (lid < stride) {
+            l_h[lid] += l_h[lid + stride];
+            l_overlap[lid] += l_overlap[lid + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid == 0) {
+        atomic_add(g_total_h, l_h[0]);
+        atomic_add(g_total_overlap, l_overlap[0]);
+    }
+}

@@ -1,0 +1,253 @@
+kernel void overlap_reduce_batch_vec1_k(
+    global uchar const * restrict all_habitats,
+    global uchar const * restrict all_flows, // questi due vettori devono essere visti come contigui
+    const int nels,
+    const int m_flows,
+    global uint * restrict output_counts, // è il nostro output
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid_x = get_global_id(0);
+    const int lid_x = get_local_id(0);
+    const int lsz_x = get_local_size(0);
+
+    const int pair_idx = get_global_id(1); // va da 0 a (n*m -1)
+    const int hab_idx = pair_idx / m_flows;
+    const int flow_idx = pair_idx % m_flows;
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid_x < nels) {
+        int hab_offset = hab_idx * nels;
+        int flow_offset = flow_idx * nels;
+
+        uchar h = all_habitats[hab_offset + gid_x];
+        uchar f = all_flows[flow_offset + gid_x];
+
+        // Essendo 0 o 1, possiamo sommare direttamente
+        my_h = h;
+        my_overlap = h & f;
+    }
+
+    l_h[lid_x] = my_h;
+    l_overlap[lid_x] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lsz_x / 2; stride > 0; stride >>= 1) {
+        if (lid_x < stride) {
+            l_h[lid_x] += l_h[lid_x + stride];
+            l_overlap[lid_x] += l_overlap[lid_x + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid_x == 0) {
+        atomic_add(&output_counts[pair_idx * 2], l_h[0]);
+        atomic_add(&output_counts[pair_idx * 2 + 1], l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_batch_vec2_k(
+    global uchar2 const * restrict all_habitats,
+    global uchar2 const * restrict all_flows,
+    const int nduos,
+    const int m_flows,
+    global uint * restrict output_counts,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid_x = get_global_id(0);
+    const int lid_x = get_local_id(0);
+    const int lsz_x = get_local_size(0);
+
+    const int pair_idx = get_global_id(1);
+    const int hab_idx = pair_idx / m_flows;
+    const int flow_idx = pair_idx % m_flows;
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid_x < nduos) {
+        int hab_offset = hab_idx * nduos;
+        int flow_offset = flow_idx * nduos;
+
+        uchar2 h = all_habitats[hab_offset + gid_x];
+        uchar2 f = all_flows[flow_offset + gid_x];
+
+        uchar2 ov = h & f;
+
+        my_h = h.x + h.y;
+        my_overlap = ov.x + ov.y;
+    }
+
+    l_h[lid_x] = my_h;
+    l_overlap[lid_x] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lsz_x / 2; stride > 0; stride >>= 1) {
+        if (lid_x < stride) {
+            l_h[lid_x] += l_h[lid_x + stride];
+            l_overlap[lid_x] += l_overlap[lid_x + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid_x == 0) {
+        atomic_add(&output_counts[pair_idx * 2], l_h[0]);
+        atomic_add(&output_counts[pair_idx * 2 + 1], l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_batch_vec4_k(
+    global uchar4 const * restrict all_habitats,
+    global uchar4 const * restrict all_flows,
+    const int nquads,
+    const int m_flows,
+    global uint * restrict output_counts,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid_x = get_global_id(0);
+    const int lid_x = get_local_id(0);
+    const int lsz_x = get_local_size(0);
+
+    const int pair_idx = get_global_id(1);
+    const int hab_idx = pair_idx / m_flows;
+    const int flow_idx = pair_idx % m_flows;
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid_x < nquads) {
+        int hab_offset = hab_idx * nquads;
+        int flow_offset = flow_idx * nquads;
+
+        uchar4 h = all_habitats[hab_offset + gid_x];
+        uchar4 f = all_flows[flow_offset + gid_x];
+
+        uchar4 ov = h & f;
+
+        my_h = h.x + h.y + h.z + h.w;
+        my_overlap = ov.x + ov.y + ov.z + ov.w;
+    }
+
+    l_h[lid_x] = my_h;
+    l_overlap[lid_x] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lsz_x / 2; stride > 0; stride >>= 1) {
+        if (lid_x < stride) {
+            l_h[lid_x] += l_h[lid_x + stride];
+            l_overlap[lid_x] += l_overlap[lid_x + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid_x == 0) {
+        atomic_add(&output_counts[pair_idx * 2], l_h[0]);
+        atomic_add(&output_counts[pair_idx * 2 + 1], l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_batch_vec8_k(
+    global uchar8 const * restrict all_habitats,
+    global uchar8 const * restrict all_flows,
+    const int neights,
+    const int m_flows,
+    global uint * restrict output_counts,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid_x = get_global_id(0);
+    const int lid_x = get_local_id(0);
+    const int lsz_x = get_local_size(0);
+
+    const int pair_idx = get_global_id(1);
+    const int hab_idx = pair_idx / m_flows;
+    const int flow_idx = pair_idx % m_flows;
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid_x < neights) {
+        int hab_offset = hab_idx * neights;
+        int flow_offset = flow_idx * neights;
+
+        uchar8 h = all_habitats[hab_offset + gid_x];
+        uchar8 f = all_flows[flow_offset + gid_x];
+
+        uchar8 ov = h & f;
+
+        my_h = h.s0 + h.s1 + h.s2 + h.s3 + h.s4 + h.s5 + h.s6 + h.s7;
+        my_overlap = ov.s0 + ov.s1 + ov.s2 + ov.s3 + ov.s4 + ov.s5 + ov.s6 + ov.s7;
+    }
+
+    l_h[lid_x] = my_h;
+    l_overlap[lid_x] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lsz_x / 2; stride > 0; stride >>= 1) {
+        if (lid_x < stride) {
+            l_h[lid_x] += l_h[lid_x + stride];
+            l_overlap[lid_x] += l_overlap[lid_x + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid_x == 0) {
+        atomic_add(&output_counts[pair_idx * 2], l_h[0]);
+        atomic_add(&output_counts[pair_idx * 2 + 1], l_overlap[0]);
+    }
+}
+
+kernel void overlap_reduce_batch_vec16_k(
+    global uchar16 const * restrict all_habitats,
+    global uchar16 const * restrict all_flows,
+    const int nsixteens,
+    const int m_flows,
+    global uint * restrict output_counts,
+    local uint * restrict l_h,
+    local uint * restrict l_overlap
+) {
+    const int gid_x = get_global_id(0);
+    const int lid_x = get_local_id(0);
+    const int lsz_x = get_local_size(0);
+
+    const int pair_idx = get_global_id(1);
+    const int hab_idx = pair_idx / m_flows;
+    const int flow_idx = pair_idx % m_flows;
+
+    uint my_h = 0;
+    uint my_overlap = 0;
+
+    if (gid_x < nsixteens) {
+        int hab_offset = hab_idx * nsixteens;
+        int flow_offset = flow_idx * nsixteens;
+
+        uchar16 h = all_habitats[hab_offset + gid_x];
+        uchar16 f = all_flows[flow_offset + gid_x];
+
+        uchar16 ov = h & f;
+
+        my_h = h.s0 + h.s1 + h.s2 + h.s3 + h.s4 + h.s5 + h.s6 + h.s7 + h.s8 + h.s9 + h.sa + h.sb + h.sc + h.sd + h.se + h.sf;
+        my_overlap = ov.s0 + ov.s1 + ov.s2 + ov.s3 + ov.s4 + ov.s5 + ov.s6 + ov.s7 + ov.s8 + ov.s9 + ov.sa + ov.sb + ov.sc + ov.sd + ov.se + ov.sf;
+    }
+
+    l_h[lid_x] = my_h;
+    l_overlap[lid_x] = my_overlap;
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    for (int stride = lsz_x / 2; stride > 0; stride >>= 1) {
+        if (lid_x < stride) {
+            l_h[lid_x] += l_h[lid_x + stride];
+            l_overlap[lid_x] += l_overlap[lid_x + stride];
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+
+    if (lid_x == 0) {
+        atomic_add(&output_counts[pair_idx * 2], l_h[0]);
+        atomic_add(&output_counts[pair_idx * 2 + 1], l_overlap[0]);
+    }
+}

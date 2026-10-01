@@ -1,0 +1,114 @@
+kernel void overlap_vec1_k(
+    global float const * restrict habitat,
+    global float const * restrict flow,
+    global uchar * restrict out,
+    const int n
+) {
+    const int i = get_global_id(0);
+    if (i >= n) return;
+
+    float h = habitat[i];
+    float f = flow[i];
+
+    uchar res = ((h > 0.0f) ? 1 : 0) | ((f > 0.0f) ? 2 : 0);
+
+    out[i] = res;
+}
+
+kernel void overlap_vec2_k(
+    global float2 const * restrict habitat,
+    global float2 const * restrict flow,
+    global uchar2 * restrict out,
+    const int npairs
+) {
+    const int i = get_global_id(0);
+    if (i >= npairs) return;
+
+    float2 h = habitat[i];
+    float2 f = flow[i];
+
+    uchar2 res;
+    res.x = ((h.x > 0.0f) ? 1 : 0) | ((f.x > 0.0f) ? 2 : 0);
+    res.y = ((h.y > 0.0f) ? 1 : 0) | ((f.y > 0.0f) ? 2 : 0);
+
+    out[i] = res;
+}
+
+kernel void overlap_vec4_k(
+    global float4 const * restrict habitat,
+    global float4 const * restrict flow,
+    global uchar4 * restrict out,
+    const int nquads
+) {
+    const int i = get_global_id(0);
+    if (i >= nquads) return;
+
+    float4 h = habitat[i];
+    float4 f = flow[i];
+
+    uchar4 res;
+    res.x = ((h.x > 0.0f) ? 1 : 0) | ((f.x > 0.0f) ? 2 : 0);
+    res.y = ((h.y > 0.0f) ? 1 : 0) | ((f.y > 0.0f) ? 2 : 0);
+    res.z = ((h.z > 0.0f) ? 1 : 0) | ((f.z > 0.0f) ? 2 : 0);
+    res.w = ((h.w > 0.0f) ? 1 : 0) | ((f.w > 0.0f) ? 2 : 0);
+
+    out[i] = res;
+}
+
+kernel void overlap_vec8_k(
+    global float8 const * restrict habitat,
+    global float8 const * restrict flow,
+    global uchar8 * restrict out,
+    const int nocts
+) {
+    const int i = get_global_id(0);
+    if (i >= nocts) return;
+
+    float8 h = habitat[i];
+    float8 f = flow[i];
+
+    uchar8 res;
+    res.s0 = ((h.s0 > 0.0f) ? 1 : 0) | ((f.s0 > 0.0f) ? 2 : 0);
+    res.s1 = ((h.s1 > 0.0f) ? 1 : 0) | ((f.s1 > 0.0f) ? 2 : 0);
+    res.s2 = ((h.s2 > 0.0f) ? 1 : 0) | ((f.s2 > 0.0f) ? 2 : 0);
+    res.s3 = ((h.s3 > 0.0f) ? 1 : 0) | ((f.s3 > 0.0f) ? 2 : 0);
+    res.s4 = ((h.s4 > 0.0f) ? 1 : 0) | ((f.s4 > 0.0f) ? 2 : 0);
+    res.s5 = ((h.s5 > 0.0f) ? 1 : 0) | ((f.s5 > 0.0f) ? 2 : 0);
+    res.s6 = ((h.s6 > 0.0f) ? 1 : 0) | ((f.s6 > 0.0f) ? 2 : 0);
+    res.s7 = ((h.s7 > 0.0f) ? 1 : 0) | ((f.s7 > 0.0f) ? 2 : 0);
+
+    out[i] = res;
+}
+
+kernel void overlap_vec16_k(
+    global float16 const * restrict habitat,
+    global float16 const * restrict flow,
+    global uchar16 * restrict out,
+    const int nhexs
+) {
+    const int i = get_global_id(0);
+    if (i >= nhexs) return;
+
+    float16 h = habitat[i];
+    float16 f = flow[i];
+
+    uchar16 res;
+    res.s0 = ((h.s0 > 0.0f) ? 1 : 0) | ((f.s0 > 0.0f) ? 2 : 0);
+    res.s1 = ((h.s1 > 0.0f) ? 1 : 0) | ((f.s1 > 0.0f) ? 2 : 0);
+    res.s2 = ((h.s2 > 0.0f) ? 1 : 0) | ((f.s2 > 0.0f) ? 2 : 0);
+    res.s3 = ((h.s3 > 0.0f) ? 1 : 0) | ((f.s3 > 0.0f) ? 2 : 0);
+    res.s4 = ((h.s4 > 0.0f) ? 1 : 0) | ((f.s4 > 0.0f) ? 2 : 0);
+    res.s5 = ((h.s5 > 0.0f) ? 1 : 0) | ((f.s5 > 0.0f) ? 2 : 0);
+    res.s6 = ((h.s6 > 0.0f) ? 1 : 0) | ((f.s6 > 0.0f) ? 2 : 0);
+    res.s7 = ((h.s7 > 0.0f) ? 1 : 0) | ((f.s7 > 0.0f) ? 2 : 0);
+    res.s8 = ((h.s8 > 0.0f) ? 1 : 0) | ((f.s8 > 0.0f) ? 2 : 0);
+    res.s9 = ((h.s9 > 0.0f) ? 1 : 0) | ((f.s9 > 0.0f) ? 2 : 0);
+    res.sa = ((h.sa > 0.0f) ? 1 : 0) | ((f.sa > 0.0f) ? 2 : 0);
+    res.sb = ((h.sb > 0.0f) ? 1 : 0) | ((f.sb > 0.0f) ? 2 : 0);
+    res.sc = ((h.sc > 0.0f) ? 1 : 0) | ((f.sc > 0.0f) ? 2 : 0);
+    res.sd = ((h.sd > 0.0f) ? 1 : 0) | ((f.sd > 0.0f) ? 2 : 0);
+    res.se = ((h.se > 0.0f) ? 1 : 0) | ((f.se > 0.0f) ? 2 : 0);
+    res.sf = ((h.sf > 0.0f) ? 1 : 0) | ((f.sf > 0.0f) ? 2 : 0);
+
+    out[i] = res;
+}
