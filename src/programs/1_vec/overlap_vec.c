@@ -3,7 +3,7 @@
 
 #include "ocl_boiler.h"
 #include "my_utilities.h"
-#include "../info.h"
+#include "../../modules/info.h"
 
 cl_event overlap(
     cl_command_queue que,

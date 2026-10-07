@@ -6,14 +6,13 @@
 #include <stdbool.h>
 #include <string.h>
 #include <dirent.h>
-#include <math.h>
 #include <sys/stat.h>
 #include <ctype.h>
-#include <time.h>
-#include "../cJSON.h"
+#include "../../modules/cJSON.h"
+#include <math.h>
 
 // --------------------------------------------------
-//      Funzioni sui file
+//      Controllo sui file
 // --------------------------------------------------
 
 typedef struct {
@@ -188,7 +187,7 @@ static inline FileList get_filepaths_list(const char *dir_path) {
         qsort(file_list, result.count, sizeof(char *), compare_paths);
     }
 
-    file_list[result.count] = NULL;
+    file_list[result.count] = NULL; 
     result.paths = file_list;
 
     return result;
@@ -206,7 +205,7 @@ int check_vec(const int v) {
 }
 
 char *get_kernel_name(const int vec) {
-    int len = snprintf(NULL, 0, "overlap_reduce_vec%d_k", vec);
+    int len = snprintf(NULL, 0, "overlap_reduce_batch_vec%d_k", vec);
     if (len < 0) {
         return NULL;
     }
@@ -217,7 +216,7 @@ char *get_kernel_name(const int vec) {
         return NULL;
     }
 
-    snprintf(name, (size_t)len + 1, "overlap_reduce_vec%d_k", vec);
+    snprintf(name, (size_t)len + 1, "overlap_reduce_batch_vec%d_k", vec);
 
     return name;
 }
@@ -226,11 +225,11 @@ char *get_kernel_name(const int vec) {
 
 
 // --------------------------------------------------
-//      Caricamento dei dati dai file
+//      Carichiamo i dati dai file
 // --------------------------------------------------
 
 typedef struct {
-    float *data;
+    u_char *data;
     size_t total_cells;
     size_t cols;
     size_t rows;
@@ -256,7 +255,7 @@ static inline Raster *load_data_from_txt(const char *filepath) {
     r->total_cells = 0;
 
     size_t capacity = 1024;
-    r->data = (float *)malloc(capacity * sizeof(float));
+    r->data = (u_char *)malloc(capacity * sizeof(u_char));
     if (!r->data) {
         perror("Error: memory allocation");
         free(r);
@@ -280,7 +279,7 @@ static inline Raster *load_data_from_txt(const char *filepath) {
                 ptr++;
             }
             if (*ptr == '\0') {
-                break;
+                break; 
             }
 
             float val = strtof(ptr, &endptr);
@@ -292,7 +291,7 @@ static inline Raster *load_data_from_txt(const char *filepath) {
 
             if (r->total_cells >= capacity) {
                 capacity *= 2;
-                float *temp = (float *)realloc(r->data, capacity * sizeof(float));
+                u_char *temp = (u_char *)realloc(r->data, capacity * sizeof(u_char));
                 if (!temp) {
                     perror("Error: realloc");
                     free(r->data);
@@ -304,7 +303,7 @@ static inline Raster *load_data_from_txt(const char *filepath) {
                 r->data = temp;
             }
 
-            r->data[r->total_cells++] = val;
+            r->data[r->total_cells++] = (val > 0.0f) ? 1 : 0;
         }
 
         if (cols_in_row == 0) {
@@ -336,7 +335,7 @@ static inline Raster *load_data_from_txt(const char *filepath) {
         return NULL;
     }
 
-    float *shrink = (float *)realloc(r->data, r->total_cells * sizeof(float));
+    u_char *shrink = (u_char *)realloc(r->data, r->total_cells * sizeof(u_char));
     if (shrink) {
         r->data = shrink;
     }
@@ -363,8 +362,7 @@ static inline void free_raster_list(Raster **raster_list, size_t count) {
     free(raster_list);
 }
 
-int check_same_dimensions(Raster **array_a, size_t count_a,
-                          Raster **array_b, size_t count_b) {
+int check_same_dimensions(Raster **array_a, size_t count_a, Raster **array_b, size_t count_b) {
     if (count_a == 0 && count_b == 0) {
         return 0;
     }
@@ -413,8 +411,8 @@ int check_same_dimensions(Raster **array_a, size_t count_a,
 // --------------------------------------------------
 
 typedef struct {
-    size_t lws;
-    size_t gws;
+    size_t lws[2];
+    size_t gws[2];
     size_t total_nwg;
     size_t useful_threads;
     
@@ -423,7 +421,7 @@ typedef struct {
     double grid_efficiency;
 } GPU_Conf;
 
-static inline void gpu_auto_conf(const cl_device_id d, const cl_kernel k, const size_t nels, const size_t vec, GPU_Conf *conf) {
+static inline void gpu_auto_conf(const cl_device_id d, const cl_kernel k, const size_t nels, const size_t vec, const size_t total_pairs, GPU_Conf *conf) {
 
     cl_int err;
 
@@ -454,21 +452,53 @@ static inline void gpu_auto_conf(const cl_device_id d, const cl_kernel k, const 
     threads_per_wg = (threads_per_wg / preferred_wg_multiple) * preferred_wg_multiple;
     if (threads_per_wg == 0) threads_per_wg = preferred_wg_multiple;
 
-    conf->lws = threads_per_wg;
+    // Configurazione LWS (2D)
+    conf->lws[0] = threads_per_wg;
+    conf->lws[1] = 1;
 
-    conf->useful_threads = round_div_up(nels, vec);
+    // Thread utili per la dimensione x (vettorizzata)
+    size_t useful_x = round_div_up(nels, vec);
 
-    conf->gws = round_mul_up(conf->useful_threads, conf->lws);
+    // Configurazione GWS (2D)
+    conf->gws[0] = round_mul_up(useful_x, conf->lws[0]);
+    conf->gws[1] = total_pairs;
 
-    conf->total_nwg = conf->gws / conf->lws;
+    // Totale complessivo dei thread utili su tutta la griglia 2D
+    conf->useful_threads = useful_x * total_pairs;
 
-    size_t allocated_threads = conf->gws;
-    conf->grid_efficiency = (allocated_threads > 0)
-                            ? ((double)conf->useful_threads / (double)allocated_threads)
+    // Calcolo work-groups totali
+    conf->total_nwg = (conf->gws[0] / conf->lws[0]) * (conf->gws[1] / conf->lws[1]);
+
+    // Grid efficiency
+    size_t total_allocated_threads = conf->gws[0] * conf->gws[1];
+    conf->grid_efficiency = (total_allocated_threads > 0)
+                            ? ((double)conf->useful_threads / (double)total_allocated_threads)
                             : 0.0;
 }
 
 // ----------------------------------------------------------------------------------
+
+static inline float get_overlap_value(const u_char *result, size_t cols, size_t rows) {
+    size_t total_elements = rows * cols;
+    size_t h = 0;
+    size_t overlap = 0;
+
+    // 1. Calcolo statistiche
+    for (size_t idx = 0; idx < total_elements; ++idx) {
+        int val = result[idx];
+
+        if (val & 1) {       // Bit 0 attivo: habitat presente (1 o 3)
+            h++;
+        }
+        if (val == 3) {      // Entrambi attivi (11 in binario)
+            overlap++;
+        }
+    }
+
+    float overlap_ratio = (h > 0) ? ((float)overlap / (float)h) : 0.0f;
+
+    return overlap_ratio;
+}
 
 static inline void print_matrix(const float *data, size_t rows, size_t cols) {
     if (data == NULL || rows == 0 || cols == 0) {

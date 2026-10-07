@@ -6,11 +6,15 @@
 #include <stdbool.h>
 #include <string.h>
 #include <dirent.h>
+#include <math.h>
 #include <sys/stat.h>
 #include <ctype.h>
 #include <time.h>
-#include <math.h>
-#include "../cJSON.h"
+#include "../../modules/cJSON.h"
+
+// --------------------------------------------------
+//      Funzioni sui file
+// --------------------------------------------------
 
 typedef struct {
     char **paths;
@@ -190,6 +194,41 @@ static inline FileList get_filepaths_list(const char *dir_path) {
     return result;
 }
 
+// --------------------------------------------------
+
+int check_vec(const int v) {
+    if (v == 1) return 1;
+    else if (v == 2) return 1;
+    else if (v == 4) return 1;
+    else if (v == 8) return 1;
+    else if (v == 16) return 1;
+    else return 0;
+}
+
+char *get_kernel_name(const int vec) {
+    int len = snprintf(NULL, 0, "overlap_reduce_vec%d_k", vec);
+    if (len < 0) {
+        return NULL;
+    }
+
+    char *name = (char *)malloc((size_t)len + 1);
+    if (name == NULL) {
+        perror("Errore malloc in get_kernel_name");
+        return NULL;
+    }
+
+    snprintf(name, (size_t)len + 1, "overlap_reduce_vec%d_k", vec);
+
+    return name;
+}
+
+// --------------------------------------------------
+
+
+// --------------------------------------------------
+//      Caricamento dei dati dai file
+// --------------------------------------------------
+
 typedef struct {
     float *data;
     size_t total_cells;
@@ -305,20 +344,27 @@ static inline Raster *load_data_from_txt(const char *filepath) {
     return r;
 }
 
-static inline void free_raster_list(Raster **raster_list, int count) {
-    if (raster_list == NULL) return;
+static inline void free_raster_list(Raster **raster_list, size_t count) {
+    if (raster_list == NULL) {
+        return;
+    }
 
-    for (int i = 0; i < count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         if (raster_list[i] != NULL) {
-            free(raster_list[i]->data);
+            if (raster_list[i]->data != NULL) {
+                free(raster_list[i]->data);
+                raster_list[i]->data = NULL;
+            }
             free(raster_list[i]);
+            raster_list[i] = NULL;
         }
     }
 
     free(raster_list);
 }
 
-int check_same_dimensions(Raster **array_a, size_t count_a, Raster **array_b, size_t count_b) {
+int check_same_dimensions(Raster **array_a, size_t count_a,
+                          Raster **array_b, size_t count_b) {
     if (count_a == 0 && count_b == 0) {
         return 0;
     }
@@ -354,7 +400,7 @@ int check_same_dimensions(Raster **array_a, size_t count_a, Raster **array_b, si
                 return 0;
             }
             if (array_b[i]->cols != target_cols || array_b[i]->rows != target_rows) {
-                return 0;
+                return 0; 
             }
         }
     }
@@ -362,33 +408,84 @@ int check_same_dimensions(Raster **array_a, size_t count_a, Raster **array_b, si
     return 1;
 }
 
-int save_overlap_matrix_to_file(const char *filename, const float *matrix, size_t rows_flow, size_t cols_habi) {
-    if (matrix == NULL || filename == NULL) {
-        return 0;
+// --------------------------------------------------
+//      Funzioni sulla GPU
+// --------------------------------------------------
+
+typedef struct {
+    size_t lws;
+    size_t gws;
+    size_t total_nwg;
+    size_t useful_threads;
+    
+    // Metriche
+    cl_uint compute_units;
+    double grid_efficiency;
+} GPU_Conf;
+
+static inline void gpu_auto_conf(const cl_device_id d, const cl_kernel k, const size_t nels, const size_t vec, GPU_Conf *conf) {
+
+    cl_int err;
+
+    err = clGetDeviceInfo(d, CL_DEVICE_MAX_COMPUTE_UNITS, sizeof(conf->compute_units), &conf->compute_units, NULL);
+    ocl_check(err, "CL_DEVICE_MAX_COMPUTE_UNITS");
+
+    size_t max_wg_items_sizes[3];           // numero massimo di work-item che possono essere allocati per dimensione
+    err = clGetDeviceInfo(d, CL_DEVICE_MAX_WORK_ITEM_SIZES, sizeof(max_wg_items_sizes), max_wg_items_sizes, NULL);
+    ocl_check(err, "CL_DEVICE_MAX_WORK_ITEM_SIZES");
+
+    size_t max_kernel_threads;
+    err = clGetKernelWorkGroupInfo(k, d, CL_KERNEL_WORK_GROUP_SIZE, sizeof(size_t), &max_kernel_threads, NULL);
+    ocl_check(err, "CL_KERNEL_WORK_GROUP_SIZE");
+
+    size_t preferred_wg_multiple;
+    err = clGetKernelWorkGroupInfo(k, d, CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, sizeof(size_t), &preferred_wg_multiple, NULL);
+    ocl_check(err, "CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE");
+    if (preferred_wg_multiple == 0) preferred_wg_multiple = 32;
+
+    size_t threads_per_wg = 256;         // 128 o 256 sono uno sweet-spot per l'occupancy sulla maggior parte dei device
+    if (threads_per_wg > max_kernel_threads)
+        threads_per_wg = max_kernel_threads;
+
+    if (threads_per_wg > max_wg_items_sizes[0])
+        threads_per_wg = max_wg_items_sizes[0];
+
+    // Arrotondiamo per difetto al multiplo del sub-group (warp/wavefront)
+    threads_per_wg = (threads_per_wg / preferred_wg_multiple) * preferred_wg_multiple;
+    if (threads_per_wg == 0) threads_per_wg = preferred_wg_multiple;
+
+    conf->lws = threads_per_wg;
+
+    conf->useful_threads = round_div_up(nels, vec);
+
+    conf->gws = round_mul_up(conf->useful_threads, conf->lws);
+
+    conf->total_nwg = conf->gws / conf->lws;
+
+    size_t allocated_threads = conf->gws;
+    conf->grid_efficiency = (allocated_threads > 0)
+                            ? ((double)conf->useful_threads / (double)allocated_threads)
+                            : 0.0;
+}
+
+// ----------------------------------------------------------------------------------
+
+static inline void print_matrix(const float *data, size_t rows, size_t cols) {
+    if (data == NULL || rows == 0 || cols == 0) {
+        printf("[Matrice vuota o non valida]\n");
+        return;
     }
 
-    FILE *fp = fopen(filename, "w");
-    if (fp == NULL) {
-        perror("Errore apertura file di output");
-        return 0;
-    }
+    printf("Overlap Matrix:\n");
+    for (size_t r = 0; r < rows; ++r) {
+        for (size_t c = 0; c < cols; ++c) {
+            size_t idx = r * cols + c;
 
-    fprintf(fp, "Flow\\Hab");
-    for (size_t j = 0; j < cols_habi; ++j) {
-        fprintf(fp, "\tH_%zu", j);
-    }
-    fprintf(fp, "\n");
-
-    for (size_t i = 0; i < rows_flow; ++i) {
-        fprintf(fp, "F_%zu", i);
-        for (size_t j = 0; j < cols_habi; ++j) {
-            fprintf(fp, "\t%.6f", matrix[i * cols_habi + j]);
+            printf("%7.4f ", data[idx]);
         }
-        fprintf(fp, "\n");
+        printf("\n");
     }
-
-    fclose(fp);
-    return 1;
+    printf("\n");
 }
 
 typedef struct timespec CpuTimer;
@@ -423,11 +520,14 @@ static inline double round_to_3_dec(double val) {
 int append_benchmark_to_json(
     const char *filepath,
     int version,
+    size_t vec,
     double kernel_ms,
+    double h2d_ms,
+    double d2h_ms,
+    double cpu_post_ms,
+    double effective_bw,
     double useful_threads
 ) {
-    size_t vec = 1;
-
     cJSON *root = NULL;
     char *file_data = NULL;
     long file_len = 0;
@@ -465,7 +565,7 @@ int append_benchmark_to_json(
     else if (version == 4)
         snprintf(version_key, sizeof(version_key), "4_gpu_reduce_batch");
     else {
-        fprintf(stderr, "nome lista json sbagliato, lato codice\n");
+        fprintf(stderr, "nome lista json sbagliato, lato codice");
         cJSON_Delete(root);
         exit(-1);
     }
@@ -479,7 +579,6 @@ int append_benchmark_to_json(
     char vec_key[16];
     snprintf(vec_key, sizeof(vec_key), "%zu", vec);
 
-    // Recupera l'array se esiste già, altrimenti lo crea
     cJSON *vec_arr = cJSON_GetObjectItemCaseSensitive(version_obj, vec_key);
     if (!vec_arr) {
         vec_arr = cJSON_CreateArray();
@@ -496,6 +595,10 @@ int append_benchmark_to_json(
         return -1;
     }
     cJSON_AddNumberToObject(entry, "kernel_ms", round_to_3_dec(kernel_ms));
+    cJSON_AddNumberToObject(entry, "h2d_ms", round_to_3_dec(h2d_ms));
+    cJSON_AddNumberToObject(entry, "d2h_ms", round_to_3_dec(d2h_ms));
+    cJSON_AddNumberToObject(entry, "cpu_post_ms", round_to_3_dec(cpu_post_ms));
+    cJSON_AddNumberToObject(entry, "effective_bw", round_to_3_dec(effective_bw));
     cJSON_AddNumberToObject(entry, "useful_threads", useful_threads);
 
     cJSON_AddItemToArray(vec_arr, entry);

@@ -10,7 +10,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <ctype.h>
-#include "../cJSON.h"
+#include "../../modules/cJSON.h"
 
 // --------------------------------------------------
 //      Controllo dei file

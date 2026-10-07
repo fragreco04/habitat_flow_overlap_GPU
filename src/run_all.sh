@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Lista delle cartelle da eseguire in sequenza
+TESTING_DIR="../testing"
+PROGRAMS_DIR="programs"
+
+# Lista delle sottocartelle dentro programs/ da eseguire in sequenza
 DIRECTORIES=(
     "2_mat_cpu"
     "3_vec_mat"
@@ -13,9 +16,9 @@ SCRIPT_NAME="run.sh"
 
 echo "=== Reset dei file JSON dal template ==="
 for grid in "1_1" "4_4" "8_8"; do
-    mkdir -p "testing/${grid}_test"
+    mkdir -p "${TESTING_DIR}/${grid}_test"
     for size in "small" "medium" "large"; do
-        cp testing/template.json "testing/${grid}_test/${size}_test.json"
+        cp "${TESTING_DIR}/template.json" "${TESTING_DIR}/${grid}_test/${size}_test.json"
     done
 done
 echo ""
@@ -24,10 +27,11 @@ echo "=== Inizio esecuzione sequenziale dei benchmark ==="
 echo ""
 
 for dir in "${DIRECTORIES[@]}"; do
-    TARGET_SCRIPT="${dir}/${SCRIPT_NAME}"
+    TARGET_DIR="${PROGRAMS_DIR}/${dir}"
+    TARGET_SCRIPT="${TARGET_DIR}/${SCRIPT_NAME}"
 
-    if [[ ! -d "$dir" ]]; then
-        echo "[-] ERRORE: La cartella '$dir' non esiste. Salto."
+    if [[ ! -d "$TARGET_DIR" ]]; then
+        echo "[-] ERRORE: La cartella '$TARGET_DIR' non esiste. Salto."
         continue
     fi
 
@@ -37,16 +41,16 @@ for dir in "${DIRECTORIES[@]}"; do
     fi
 
     echo "=========================================================="
-    echo ">> Avvio benchmark in: $dir"
+    echo ">> Avvio benchmark in: $TARGET_DIR"
     echo "=========================================================="
 
     (
-        cd "$dir"
+        cd "$TARGET_DIR"
         bash "$SCRIPT_NAME"
     )
 
     echo ""
-    echo ">> Completato: $dir"
+    echo ">> Completato: $TARGET_DIR"
     echo ""
 done
 

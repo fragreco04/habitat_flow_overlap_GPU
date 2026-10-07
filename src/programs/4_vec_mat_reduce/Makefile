@@ -2,15 +2,16 @@ CC = gcc
 CFLAGS = -O3 -march=native -Wall -Wextra
 LDLIBS = -lOpenCL -lm
 
-TARGET = overlap_mat
-SRCS = $(TARGET).c
-DEPS = my_utilities.h ocl_boiler.h ../info.h
+TARGET = overlap_vec_mat_reduce
+SRCS = $(TARGET).c ../../modules/cJSON.c
+DEPS = my_utilities.h ocl_boiler.h ../../modules/cJSON.h ../../modules/info.h
 
 all: $(TARGET)
 
 $(TARGET): $(SRCS) $(DEPS)
 	$(CC) $(CFLAGS) $(SRCS) -o $@ $(LDLIBS)
 
+# Target per pulire
 clean:
 	rm -f $(TARGET)
 

@@ -1,17 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 
 #include "ocl_boiler.h"
 #include "my_utilities.h"
-#include "../info.h"
+#include "../../modules/info.h"
 
 cl_event overlap(
     cl_command_queue que,
     cl_kernel kernel,
     cl_mem habitat,
     cl_mem flow,
-    cl_mem out,
+    cl_mem total_h,
+    cl_mem total_overlap,
     cl_int nels,
     size_t *lws,
     size_t *gws,
@@ -21,6 +21,7 @@ cl_event overlap(
     cl_int err;
     cl_event overlap_evt;
 
+    size_t local_mem_bytes = *lws * sizeof(cl_uint);
     cl_uint arg_index = 0;
 
     err = clSetKernelArg(kernel, arg_index, sizeof(cl_mem), &habitat);
@@ -31,14 +32,25 @@ cl_event overlap(
     ocl_check(err, "init_k set kernel arg %d", arg_index);
     ++arg_index;
 
-    err = clSetKernelArg(kernel, arg_index, sizeof(cl_mem), &out);
-    ocl_check(err, "init_k set kernel arg %d", arg_index);
-    ++arg_index;
-
     err = clSetKernelArg(kernel, arg_index, sizeof(cl_int), &nels);
     ocl_check(err, "init_k set kernel arg %d", arg_index);
     ++arg_index;
 
+    err = clSetKernelArg(kernel, arg_index, sizeof(cl_mem), &total_h);
+    ocl_check(err, "init_k set kernel arg %d", arg_index);
+    ++arg_index;
+
+    err = clSetKernelArg(kernel, arg_index, sizeof(cl_mem), &total_overlap);
+    ocl_check(err, "init_k set kernel arg %d", arg_index);
+    ++arg_index;
+
+    err = clSetKernelArg(kernel, arg_index, local_mem_bytes, NULL);
+    ocl_check(err, "init_k set kernel arg %d", arg_index);
+    ++arg_index;
+
+    err = clSetKernelArg(kernel, arg_index, local_mem_bytes, NULL);
+    ocl_check(err, "init_k set kernel arg %d", arg_index);
+    ++arg_index;
 
     err = clEnqueueNDRangeKernel(
         que, kernel,
@@ -53,7 +65,7 @@ cl_event overlap(
 }
 
 int main(int argc, char *argv[]) {
-
+    
     CpuTimer total_program_timer = cpu_timer_start();
     CpuTimer pre_processing_timer = cpu_timer_start();
 
@@ -177,13 +189,14 @@ int main(int argc, char *argv[]) {
 
     cl_program prog = create_program("overlap.ocl", ctx, d);
 
+    // Impostiamo il kernel
     char *kernel_name = get_kernel_name(vec);
     cl_kernel overlap_k = clCreateKernel(prog, kernel_name, &err);
     ocl_check(err, "clCreateKernel %s fallito", kernel_name);
 
     const size_t nels = habi_raster[0]->total_cells;
     size_t nels_pad = nels;
-    if (nels % vec != 0) {
+    if (nels % vec != 0) {                          // Aggiungiamo un paddding agli elemtni
         nels_pad = nels + (vec - (nels % vec));
     }
 
@@ -192,18 +205,15 @@ int main(int argc, char *argv[]) {
     size_t memsize_host = sizeof(float) * nels;
     size_t memsize_dev  = sizeof(float) * nels_pad;
     
-    size_t memsize_out_host = sizeof(u_char) * nels;
-    size_t memsize_out_dev  = sizeof(u_char) * nels_pad;
-
     GPU_Conf conf;
     gpu_auto_conf(d, overlap_k, nels, vec, &conf);
 
+    // Creazione dei buffer GPU e riempimento
     cl_mem d_habitat = clCreateBuffer(ctx, CL_MEM_READ_ONLY, memsize_dev, NULL, &err);
     ocl_check(err, "clCreateBuffer failed (d_habitat)");
     cl_mem d_flow = clCreateBuffer(ctx, CL_MEM_READ_ONLY, memsize_dev, NULL, &err);
     ocl_check(err, "clCreateBuffer failed (d_flow)");
 
-    // Riempiamo il padding con degli zeri
     if (memsize_dev > memsize_host) {
         float zero = 0.0f;
         size_t pad_offset = memsize_host;
@@ -216,57 +226,83 @@ int main(int argc, char *argv[]) {
         ocl_check(err, "fill padding d_flow");
     }
     
-    cl_mem d_out = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, memsize_out_dev, NULL, &err);
-    ocl_check(err, "clCreateBuffer failed (d_out)");
+    cl_mem d_total_h = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), NULL, &err);
+    ocl_check(err, "clCreateBuffer failed (d_total_h)");
+    cl_mem d_total_overlap = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(cl_uint), NULL, &err);
+    ocl_check(err, "clCreateBuffer failed (d_total_overlap)");
 
     size_t n = habi_list.count;
     size_t m = flow_list.count;
 
-    size_t cols = habi_raster[0]->cols;
-    size_t rows = habi_raster[0]->rows;
-
-    u_char *h_out = calloc(nels, sizeof(u_char));
-    if (h_out == NULL) { fprintf(stderr, "Error: h_out allocation"); exit(12); }
-
+    // Allochiamoo la matrice in cui inseriremo i risultati
     float *overlap_matrix = malloc(sizeof(float)*n*m);
     if (overlap_matrix == NULL) { fprintf(stderr, "Error: overlap_matrix allocation"); exit(12); }
 
     cl_event hab_write_evt = NULL;
     cl_event flow_write_evt = NULL;
+    cl_event reset_h_evt = NULL;
+    cl_event reset_o_evt = NULL;
     cl_event kernel_evt = NULL;
-    cl_event read_evt = NULL;
+    cl_event read_h_evt = NULL;
+    cl_event read_o_evt = NULL;
 
     cl_ulong total_hab_write_ns = 0;
     cl_ulong total_flow_write_ns = 0;
+    cl_ulong total_reset_write_ns = 0;
     cl_ulong total_kernel_ns = 0;
     cl_ulong total_read_ns = 0;
 
     double ms_total_cpu = 0.0;
 
+    cl_uint zero_val = 0;
+    cl_uint h_val = 0;
+    cl_uint overlap_val = 0;
+
     for (size_t i = 0; i < n; ++i) {
+        // Scrittura habitat
         err = clEnqueueWriteBuffer(que, d_habitat, CL_FALSE, 0, memsize_host, habi_raster[i]->data, 0, NULL, &hab_write_evt);
         ocl_check(err, "write habitat [%zu]", i);
 
         for (size_t j = 0; j < m; ++j) {
+            // Azzeramento dei buffer GPU (nessun passaggio su pcie)
+            err = clEnqueueFillBuffer(que, d_total_h, &zero_val, sizeof(cl_uint), 0, sizeof(cl_uint), 0, NULL, &reset_h_evt);
+            ocl_check(err, "fill d_total_h [%zu][%zu]", i, j);
+
+            err = clEnqueueFillBuffer(que, d_total_overlap, &zero_val, sizeof(cl_uint), 0, sizeof(cl_uint), 0, NULL, &reset_o_evt);
+            ocl_check(err, "fill d_total_overlap [%zu][%zu]", i, j);
+
+            // Scrittura flow
             err = clEnqueueWriteBuffer(que, d_flow, CL_FALSE, 0, memsize_host, flow_raster[j]->data, 0, NULL, &flow_write_evt);
             ocl_check(err, "write flow [%zu][%zu]", i, j);
 
-            cl_event kern_waits[] = { hab_write_evt, flow_write_evt };
-            kernel_evt = overlap(que, overlap_k, d_habitat, d_flow, d_out, num_vectors, &conf.lws, &conf.gws, 2, kern_waits);
+            // Avviamo i kernel, aspettano che siano pronti habitat, flow e i contatori azzerati
+            cl_event kern_waits[] = {hab_write_evt, flow_write_evt, reset_h_evt, reset_o_evt};
+            kernel_evt = overlap(que, overlap_k, d_habitat, d_flow, d_total_h, d_total_overlap, num_vectors, &conf.lws, &conf.gws, 4, kern_waits);
 
-            err = clEnqueueReadBuffer(que, d_out, CL_TRUE, 0, memsize_out_host, h_out, 1, &kernel_evt, &read_evt);
-            ocl_check(err, "read out [%zu][%zu]", i, j);
+            // Lettura risultati
+            err = clEnqueueReadBuffer(que, d_total_h, CL_TRUE, 0, sizeof(cl_uint), &h_val, 1, &kernel_evt, &read_h_evt);
+            ocl_check(err, "read d_total_h [%zu][%zu]", i, j);
 
+            // QUesta lettura è bloccante, funge da sincronizzatore
+            err = clEnqueueReadBuffer(que, d_total_overlap, CL_TRUE, 0, sizeof(cl_uint), &overlap_val, 1, &kernel_evt, &read_o_evt);
+            ocl_check(err, "read d_total_overlap [%zu][%zu]", i, j);
+
+            // A questo punto il read bloccante è tornato: tutti gli eventi precedenti sono conclusi
+            total_reset_write_ns += runtime_ns(reset_h_evt) + runtime_ns(reset_o_evt);
             total_flow_write_ns += runtime_ns(flow_write_evt);
             total_kernel_ns += runtime_ns(kernel_evt);
-            total_read_ns += runtime_ns(read_evt);
+            total_read_ns += runtime_ns(read_h_evt) + runtime_ns(read_o_evt);
 
+            clReleaseEvent(reset_h_evt);
+            clReleaseEvent(reset_o_evt);
             clReleaseEvent(flow_write_evt);
             clReleaseEvent(kernel_evt);
-            clReleaseEvent(read_evt);
+            clReleaseEvent(read_h_evt);
+            clReleaseEvent(read_o_evt);
 
+            // Calcolo CPU
             CpuTimer t_cpu_step = cpu_timer_start();
-            overlap_matrix[i * m + j] = get_overlap_value(h_out, cols, rows);
+            overlap_matrix[i * m + j] = (h_val > 0) ? ((float)overlap_val / (float)h_val) : 0.0f;
             ms_total_cpu += cpu_timer_stop_ms(t_cpu_step);
         }
 
@@ -278,17 +314,16 @@ int main(int argc, char *argv[]) {
 
     printf("\n");
     print_matrix(overlap_matrix, n, m);
-    printf("\n");
 
     cl_ulong total_write_ns = total_hab_write_ns + total_flow_write_ns;
 
     // Byte transitati sul bus pcie (n scritture habitat + n*m scritture flow)
     double bytes_h2d_pcie = ((double)n * (double)memsize_host) + ((double)(n * m) * (double)memsize_host);
-    double bytes_d2h_pcie = (double)(memsize_out_host * n * m);
+    double bytes_d2h_pcie = (double)(sizeof(cl_uint)*2 * n * m);
 
     // Byte elaborati dalla DRAM della GPU (senza contare il padding)
     double total_kernel_read_bytes = (double)(2 * memsize_host * n * m);
-    double total_kernel_write_bytes = (double)(memsize_out_host * n * m);
+    double total_kernel_write_bytes = bytes_d2h_pcie;
 
     double effective_bw = ((total_kernel_read_bytes + total_kernel_write_bytes) / (total_kernel_ns * 1.0e-9)) / 1.0e9;
     double bw_efficiency = (peak_memory_bandwidth > 0.0) 
@@ -317,7 +352,6 @@ int main(int argc, char *argv[]) {
 
     // -----------------------------------------------------------
 
-    
     char *json_filepath = argv[5];
     if (strcmp(json_filepath, "no") == 0) {
         printf("No salvataggio come test.\n");
@@ -331,22 +365,20 @@ int main(int argc, char *argv[]) {
         double json_cpu_post = ms_total_cpu;
         double json_effective_bw = effective_bw;
         double json_useful_threads = (double)conf.useful_threads * (double)(n * m);
-    
-        int version = 2;
+        
+        int version = 3;
     
         if (is_warm_up != 1) {
             if (append_benchmark_to_json(json_filepath, version, vec, json_kernel, json_h2d, json_d2h, json_cpu_post, json_effective_bw, json_useful_threads) == 0) {
-            printf("\nBenchmark salvato con successo in %s [versione %d, vec %zu]\n", json_filepath, version, vec);
+                printf("\nBenchmark salvato con successo in %s [versione %d, vec %zu]\n", json_filepath, version, vec);
             } else {
-            fprintf(stderr, "\nErrore durante il salvataggio in %s\n", json_filepath);
+                fprintf(stderr, "\nErrore durante il salvataggio in %s\n", json_filepath);
             }
         }
     }
 
     // -----------------------------------------------------------
 
-
-    free(h_out);
     free(overlap_matrix);
 
     free_file_list(&habi_list);
@@ -362,7 +394,8 @@ int main(int argc, char *argv[]) {
 
     clReleaseMemObject(d_habitat);
     clReleaseMemObject(d_flow);
-    clReleaseMemObject(d_out);
+    clReleaseMemObject(d_total_h);
+    clReleaseMemObject(d_total_overlap);
 
     clReleaseKernel(overlap_k);
     clReleaseProgram(prog);

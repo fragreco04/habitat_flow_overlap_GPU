@@ -2,9 +2,9 @@ CC = gcc
 CFLAGS = -O3 -march=native -Wall -Wextra
 LDLIBS = -lOpenCL -lm
 
-TARGET = overlap_vec
+TARGET = overlap_mat
 SRCS = $(TARGET).c
-DEPS = my_utilities.h ocl_boiler.h ../info.h
+DEPS = my_utilities.h ocl_boiler.h ../../modules/info.h
 
 all: $(TARGET)
 
