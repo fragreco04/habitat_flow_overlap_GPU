@@ -2,3 +2,4 @@ prompt_gemini.txt
 data/
 
 .vscode/
+.git_token
