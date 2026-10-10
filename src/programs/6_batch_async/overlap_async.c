@@ -124,15 +124,6 @@ int main(int argc, char *argv[]) {
     size_t n = habi_list.count;
     size_t m = flow_list.count;
 
-    size_t n_batch = n;
-    size_t m_batch = m;
-    if (argc >= 7) n_batch = atoi(argv[6]);
-    if (argc >= 8) m_batch = atoi(argv[7]);
-    if (n_batch == 0 || n_batch > n) n_batch = n;
-    if (m_batch == 0 || m_batch > m) m_batch = m;
-
-    printf("Batch Sizes: Habitat = %zu, Flow = %zu\n", n_batch, m_batch);
-
     cl_platform_id p = select_platform();
     cl_device_id d = select_device(p);
     cl_context ctx = create_context(p, d);
@@ -141,41 +132,65 @@ int main(int argc, char *argv[]) {
     queues[1] = create_queue(ctx, d);
     printf("\n");
 
-    double ms_preprocessing = cpu_timer_stop_ms(pre_processing_timer);
     cl_int err;
     cl_program prog = create_program("overlap.ocl", ctx, d);
     char *kernel_name = get_kernel_name(vec);
-    cl_kernel overlap_k = clCreateKernel(prog, kernel_name, &err);
-    ocl_check(err, "clCreateKernel fallito");
+    
+    // Creiamo due istanze separate del kernel per evitare race condition
+    cl_kernel overlap_k[2];
+    overlap_k[0] = clCreateKernel(prog, kernel_name, &err);
+    ocl_check(err, "clCreateKernel 0 fallito");
+    overlap_k[1] = clCreateKernel(prog, kernel_name, &err);
+    ocl_check(err, "clCreateKernel 1 fallito");
 
     const size_t nels = habi_raster[0]->total_cells;
     size_t nels_pad = nels;
-    if (nels % vec != 0) nels_pad = nels + (vec - (nels % vec));
+    if (nels % vec != 0) 
+        nels_pad = nels + (vec - (nels % vec));
 
     cl_uint num_vectors = (cl_uint)(nels_pad / vec);
     size_t memsize_host = sizeof(u_char) * nels;
     size_t memsize_dev  = sizeof(u_char) * nels_pad;
 
-    // Memoria Host Pinned
+    // Autotuning della Memoria
+    size_t *batch_values = mem_auto_conf(argc, argv, d, n, m, memsize_dev);
+    if (batch_values == NULL) {
+        fprintf(stderr, "Error: mem_auto_conf");
+        exit(11);
+    }
+
+    size_t n_batch = batch_values[0];
+    size_t m_batch = batch_values[1];
+    free(batch_values);
+
+    // Pre-calcoliamo la configurazione base
+    GPU_Conf base_conf;
+    gpu_auto_conf(d, overlap_k[0], nels, vec, 1, &base_conf);
+
+    double ms_preprocessing = cpu_timer_stop_ms(pre_processing_timer);
+
+    // Memoria Host Pinned (Solo per Matrici Massicce)
     cl_mem p_hab = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, n * memsize_dev, NULL, &err);
     u_char *h_all_habitats = clEnqueueMapBuffer(queues[0], p_hab, CL_TRUE, CL_MAP_WRITE, 0, n * memsize_dev, 0, NULL, NULL, &err);
 
     cl_mem p_flow = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, m * memsize_dev, NULL, &err);
     u_char *h_all_flows = clEnqueueMapBuffer(queues[0], p_flow, CL_TRUE, CL_MAP_WRITE, 0, m * memsize_dev, 0, NULL, NULL, &err);
 
-    for (size_t i = 0; i < n; ++i) memcpy(h_all_habitats + (i * nels_pad), habi_raster[i]->data, memsize_host);
-    for (size_t j = 0; j < m; ++j) memcpy(h_all_flows + (j * nels_pad), flow_raster[j]->data, memsize_host);
+    for (size_t i = 0; i < n; ++i) 
+        memcpy(h_all_habitats + (i * nels_pad), habi_raster[i]->data, memsize_host);
+    for (size_t j = 0; j < m; ++j) 
+        memcpy(h_all_flows + (j * nels_pad), flow_raster[j]->data, memsize_host);
 
-    cl_mem p_counts[2];
+    // FIX INTEL DRIVER: Sostituzione dei buffer mappati con malloc standard per gli array minuscoli di output
     cl_uint *h_counts[2];
     for (int i = 0; i < 2; ++i) {
-        p_counts[i] = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR, n_batch * m_batch * 2 * sizeof(cl_uint), NULL, &err);
-        h_counts[i] = clEnqueueMapBuffer(queues[0], p_counts[i], CL_TRUE, CL_MAP_READ, 0, n_batch * m_batch * 2 * sizeof(cl_uint), 0, NULL, NULL, &err);
+        h_counts[i] = malloc(n_batch * m_batch * 2 * sizeof(cl_uint));
+        if (!h_counts[i]) { fprintf(stderr, "Error: h_counts allocation\n"); exit(12); }
     }
 
     // Memoria Device Double Buffered
     cl_mem d_habitats = clCreateBuffer(ctx, CL_MEM_READ_ONLY, n_batch * memsize_dev, NULL, &err);
-    cl_mem d_flows[2];
+    cl_mem d_flows[2];  
     cl_mem d_counts[2];
     for (int i = 0; i < 2; ++i) {
         d_flows[i] = clCreateBuffer(ctx, CL_MEM_READ_ONLY, m_batch * memsize_dev, NULL, &err);
@@ -198,14 +213,16 @@ int main(int argc, char *argv[]) {
     cl_ulong total_kernel_ns = 0, total_read_ns = 0;
     double ms_total_cpu = 0.0;
     
-    GPU_Conf conf_final; // Per report finale
+    GPU_Conf conf_final;
 
-    // Esecuzione Tiling 2D
+    // Esecuzione Tiling 2D Pipelined
     size_t h_idx = 0;
     while (h_idx < n) {
         size_t curr_n = (n - h_idx < n_batch) ? (n - h_idx) : n_batch;
         
-        err = clEnqueueWriteBuffer(queues[0], d_habitats, CL_FALSE, 0, curr_n * memsize_dev, h_all_habitats + (h_idx * nels_pad), 0, NULL, &hab_write_evt);
+        err = clEnqueueWriteBuffer(queues[0], d_habitats, CL_FALSE, 0, curr_n * memsize_dev, 
+                                  h_all_habitats + (h_idx * nels_pad), 0, NULL, &hab_write_evt);
+        ocl_check(err, "write habitats chunk");
 
         size_t f_idx = 0;
         int step = 0;
@@ -218,8 +235,8 @@ int main(int argc, char *argv[]) {
                 clWaitForEvents(1, &read_evts[q]);
                 
                 total_write_flow_ns += runtime_ns(flow_write_evts[q]);
-                total_kernel_ns += runtime_ns(kernel_evts[q]);
-                total_read_ns += runtime_ns(read_evts[q]);
+                total_kernel_ns     += runtime_ns(kernel_evts[q]);
+                total_read_ns       += runtime_ns(read_evts[q]);
 
                 CpuTimer cpu_timer = cpu_timer_start();
                 for (size_t local_h = 0; local_h < track_n[q]; ++local_h) {
@@ -240,7 +257,6 @@ int main(int argc, char *argv[]) {
                 clReleaseEvent(fill_evts[q]);
                 clReleaseEvent(kernel_evts[q]);
                 clReleaseEvent(read_evts[q]);
-                flow_write_evts[q] = NULL;
                 has_data[q] = false;
             }
 
@@ -250,64 +266,70 @@ int main(int argc, char *argv[]) {
             track_m[q] = curr_m;
             has_data[q] = true;
 
-            err = clEnqueueWriteBuffer(queues[q], d_flows[q], CL_FALSE, 0, curr_m * memsize_dev, h_all_flows + (f_idx * nels_pad), 0, NULL, &flow_write_evts[q]);
+            err = clEnqueueWriteBuffer(queues[q], d_flows[q], CL_FALSE, 0, curr_m * memsize_dev, 
+                                      h_all_flows + (f_idx * nels_pad), 0, NULL, &flow_write_evts[q]);
             
             cl_uint zero = 0;
-            err = clEnqueueFillBuffer(queues[q], d_counts[q], &zero, sizeof(cl_uint), 0, curr_n * curr_m * 2 * sizeof(cl_uint), 0, NULL, &fill_evts[q]);
+            err = clEnqueueFillBuffer(queues[q], d_counts[q], &zero, sizeof(cl_uint), 0, 
+                                      curr_n * curr_m * 2 * sizeof(cl_uint), 0, NULL, &fill_evts[q]);
 
-            GPU_Conf conf_batch;
-            gpu_auto_conf(d, overlap_k, nels, vec, curr_n * curr_m, &conf_batch);
+            GPU_Conf conf_batch = base_conf;
+            conf_batch.gws[1] = curr_n * curr_m;
             conf_final = conf_batch; 
 
-            cl_event wait_list[2] = {hab_write_evt, flow_write_evts[q]};
-            cl_uint num_wait = (step < 2) ? 2 : 1; 
-            if (step >= 2) wait_list[0] = flow_write_evts[q];
+            cl_uint num_wait = (q == 1) ? 1 : 0;
+            cl_event *wait_ptr = (q == 1) ? &hab_write_evt : NULL;
 
-            kernel_evts[q] = overlap(queues[q], overlap_k, d_habitats, d_flows[q], num_vectors, (cl_uint)curr_m, d_counts[q], conf_batch.lws, conf_batch.gws, num_wait, wait_list);
+            kernel_evts[q] = overlap(queues[q], overlap_k[q], d_habitats, d_flows[q], 
+                                     num_vectors, (cl_uint)curr_m, d_counts[q], 
+                                     conf_batch.lws, conf_batch.gws, num_wait, wait_ptr);
 
-            err = clEnqueueReadBuffer(queues[q], d_counts[q], CL_FALSE, 0, curr_n * curr_m * 2 * sizeof(cl_uint), h_counts[q], 1, &kernel_evts[q], &read_evts[q]);
+            err = clEnqueueReadBuffer(queues[q], d_counts[q], CL_FALSE, 0, 
+                                      curr_n * curr_m * 2 * sizeof(cl_uint), 
+                                      h_counts[q], 0, NULL, &read_evts[q]);
+            ocl_check(err, "read d_counts chunk");
 
             f_idx += curr_m;
             step++;
         }
 
-        clWaitForEvents(1, &hab_write_evt);
+        // Svuotamento della coda di fine blocco
+        for (int q = 0; q < 2; ++q) {
+            if (has_data[q]) {
+                clWaitForEvents(1, &read_evts[q]);
+                
+                total_write_flow_ns += runtime_ns(flow_write_evts[q]);
+                total_kernel_ns     += runtime_ns(kernel_evts[q]);
+                total_read_ns       += runtime_ns(read_evts[q]);
+
+                CpuTimer cpu_timer = cpu_timer_start();
+                for (size_t local_h = 0; local_h < track_n[q]; ++local_h) {
+                    for (size_t local_f = 0; local_f < track_m[q]; ++local_f) {
+                        size_t global_h = track_h[q] + local_h;
+                        size_t global_f = track_f[q] + local_f;
+                        size_t pair_idx_local = local_h * track_m[q] + local_f;
+                        size_t pair_idx_global = global_h * m + global_f;
+
+                        cl_uint h_val = h_counts[q][pair_idx_local * 2];
+                        cl_uint overlap_val = h_counts[q][pair_idx_local * 2 + 1];
+                        overlap_matrix[pair_idx_global] = (h_val > 0) ? ((float)overlap_val / (float)h_val) : 0.0f;
+                    }
+                }
+                ms_total_cpu += cpu_timer_stop_ms(cpu_timer);
+
+                clReleaseEvent(flow_write_evts[q]);
+                clReleaseEvent(fill_evts[q]);
+                clReleaseEvent(kernel_evts[q]);
+                clReleaseEvent(read_evts[q]);
+                has_data[q] = false;
+            }
+        }
+
         total_write_hab_ns += runtime_ns(hab_write_evt);
         clReleaseEvent(hab_write_evt);
         hab_write_evt = NULL;
 
         h_idx += curr_n;
-    }
-
-    // Svuotamento code
-    for (int q = 0; q < 2; ++q) {
-        if (has_data[q]) {
-            clWaitForEvents(1, &read_evts[q]);
-            
-            total_write_flow_ns += runtime_ns(flow_write_evts[q]);
-            total_kernel_ns += runtime_ns(kernel_evts[q]);
-            total_read_ns += runtime_ns(read_evts[q]);
-
-            CpuTimer cpu_timer = cpu_timer_start();
-            for (size_t local_h = 0; local_h < track_n[q]; ++local_h) {
-                for (size_t local_f = 0; local_f < track_m[q]; ++local_f) {
-                    size_t global_h = track_h[q] + local_h;
-                    size_t global_f = track_f[q] + local_f;
-                    size_t pair_idx_global = global_h * m + global_f;
-                    size_t pair_idx_local = local_h * track_m[q] + local_f;
-
-                    cl_uint h_val = h_counts[q][pair_idx_local * 2];
-                    cl_uint overlap_val = h_counts[q][pair_idx_local * 2 + 1];
-                    overlap_matrix[pair_idx_global] = (h_val > 0) ? ((float)overlap_val / (float)h_val) : 0.0f;
-                }
-            }
-            ms_total_cpu += cpu_timer_stop_ms(cpu_timer);
-
-            clReleaseEvent(flow_write_evts[q]);
-            clReleaseEvent(fill_evts[q]);
-            clReleaseEvent(kernel_evts[q]);
-            clReleaseEvent(read_evts[q]);
-        }
     }
 
     clFinish(queues[0]);
@@ -322,7 +344,7 @@ int main(int argc, char *argv[]) {
     double bytes_h2d_pcie = (memsize_dev * n) + (memsize_dev * m * iterations_outer);
     double bytes_d2h_pcie = (double)(n * m) * (double)(2 * sizeof(cl_uint));
 
-    double total_kernel_read_bytes = 2.0 * (double)memsize_host * (double)(n * m);
+    double total_kernel_read_bytes = 2.0 * (double)memsize_dev * (double)(n * m);
     double total_kernel_write_bytes = bytes_d2h_pcie;
 
     double effective_bw = ((total_kernel_read_bytes + total_kernel_write_bytes) / (total_kernel_ns * 1.0e-9)) / 1.0e9;
@@ -370,15 +392,14 @@ int main(int argc, char *argv[]) {
 
     clEnqueueUnmapMemObject(queues[0], p_hab, h_all_habitats, 0, NULL, NULL);
     clEnqueueUnmapMemObject(queues[0], p_flow, h_all_flows, 0, NULL, NULL);
-    for (int i = 0; i < 2; ++i) clEnqueueUnmapMemObject(queues[0], p_counts[i], h_counts[i], 0, NULL, NULL);
 
     clReleaseMemObject(p_hab);
     clReleaseMemObject(p_flow);
     clReleaseMemObject(d_habitats);
     for (int i = 0; i < 2; ++i) {
-        clReleaseMemObject(p_counts[i]);
         clReleaseMemObject(d_flows[i]);
         clReleaseMemObject(d_counts[i]);
+        free(h_counts[i]);
     }
 
     free(overlap_matrix);
@@ -388,7 +409,8 @@ int main(int argc, char *argv[]) {
     free_raster_list(flow_raster, flow_list.count);
     free(kernel_name);
 
-    clReleaseKernel(overlap_k);
+    clReleaseKernel(overlap_k[0]);
+    clReleaseKernel(overlap_k[1]);
     clReleaseProgram(prog);
     clReleaseCommandQueue(queues[0]);
     clReleaseCommandQueue(queues[1]);
@@ -396,8 +418,7 @@ int main(int argc, char *argv[]) {
 
     double ms_total_program = cpu_timer_stop_ms(total_program_timer);
 
-    printf("\n");
-    printf("--- TEMPI DEL PROGRAMMA ---\n");
+    printf("\n--- TEMPI DEL PROGRAMMA ---\n");
     printf("Tempo pre-processing:   %8.2f ms\n", ms_preprocessing);
     printf("Tempo CPU post-proces:  %8.2f ms\n", ms_total_cpu);
     printf("Tempo totale:           %8.2f ms\n", ms_total_program);

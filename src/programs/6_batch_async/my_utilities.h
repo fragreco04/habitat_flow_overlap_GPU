@@ -10,6 +10,9 @@
 #include <ctype.h>
 #include "../../modules/cJSON.h"
 #include <math.h>
+#include <sys/types.h>
+
+typedef unsigned char u_char;
 
 // --------------------------------------------------
 //      Controllo sui file
@@ -398,12 +401,82 @@ int check_same_dimensions(Raster **array_a, size_t count_a, Raster **array_b, si
                 return 0;
             }
             if (array_b[i]->cols != target_cols || array_b[i]->rows != target_rows) {
-                return 0; 
+                return 0;
             }
         }
     }
 
     return 1;
+}
+
+// Auto configurazione della memoria
+size_t *mem_auto_conf(const int argc, char **argv, const cl_device_id d, const size_t n, const size_t m, const size_t memsize_dev) {
+
+    cl_int err;
+
+    cl_ulong max_alloc_size;        // Massima dimensione in byte dei buffer GPU
+    cl_ulong global_mem_size;       // Memoria massima in byteconcessa alla GPU dal driver
+    err = clGetDeviceInfo(d, CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof(cl_ulong), &max_alloc_size, NULL);
+    ocl_check(err, "clGetDeviceInfo MAX_MEM_ALLOC_SIZE");
+    err = clGetDeviceInfo(d, CL_DEVICE_GLOBAL_MEM_SIZE, sizeof(cl_ulong), &global_mem_size, NULL);
+    ocl_check(err, "clGetDeviceInfo GLOBAL_MEM_SIZE");
+
+    cl_ulong safe_global_mem = (cl_ulong)(global_mem_size * 0.80);      // Impostiamo il limite di saturazione della memoria GPU all'80%
+    cl_ulong safe_max_alloc = (cl_ulong)(max_alloc_size * 0.90);        // Impostiamo il limite anche ai buffer al 90%
+
+    size_t n_batch = 0;
+    size_t m_batch = 0;
+    if (argc >= 7) n_batch = atoi(argv[6]);
+    if (argc >= 8) m_batch = atoi(argv[7]);
+
+    // Caso in cui non impostiamo manualmente il limite di invio dei batch
+    if (n_batch == 0 || m_batch == 0) {
+        n_batch = n;
+        m_batch = m;
+        
+        while (1) {
+            cl_ulong hab_batch_bytes = n_batch * memsize_dev;                                               // Buffer singolo per il batch corrente di habitat
+            cl_ulong flow_buf_bytes = m_batch * memsize_dev;                                                // Singolo buffer per il batch di flussi
+            cl_ulong counts_buf_bytes = n_batch * m_batch * 2 * sizeof(cl_uint);                            // Singolo buffer per i conteggi in output (coppie habitat-flusso)
+            cl_ulong total_device_mem_needed = hab_batch_bytes + 2 * flow_buf_bytes + 2 * counts_buf_bytes; // VRAM totale richiesta (considera il double buffering x2)
+
+            // Caso in cui non sforiamo più nessun limite
+            if (total_device_mem_needed <= safe_global_mem && 
+                hab_batch_bytes <= safe_max_alloc && 
+                flow_buf_bytes <= safe_max_alloc && 
+                counts_buf_bytes <= safe_max_alloc) {
+                break;
+            }
+
+            if (n_batch > 1 && n_batch >= m_batch) {    // Se abbiamo più matrci h rispetto ad f
+                n_batch /= 2;
+                if (n_batch == 0) n_batch = 1;
+            } else if (m_batch > 1) {
+                m_batch /= 2;
+                if (m_batch == 0) m_batch = 1;
+            } else {
+                break;                                  // Limite hardware estremo
+            }
+        }
+    }
+
+    if (n_batch > n) n_batch = n;
+    if (m_batch > m) m_batch = m;
+
+    printf("Auto-Tuning Memoria:\n");
+    printf("\tGlobal Mem: %lu MB | Max Alloc: %lu MB\n", global_mem_size / (1024*1024), max_alloc_size / (1024*1024));
+    printf("\tBatch Sizes: Habitat = %zu, Flow = %zu\n\n", n_batch, m_batch);
+
+    size_t *return_obj = calloc(2, sizeof(size_t));
+    if (return_obj == NULL) {
+        fprintf(stderr, "Allocazione fallita");
+        exit(-1);
+    }
+
+    return_obj[0] = n_batch;
+    return_obj[1] = m_batch;
+
+    return return_obj;
 }
 
 // --------------------------------------------------
