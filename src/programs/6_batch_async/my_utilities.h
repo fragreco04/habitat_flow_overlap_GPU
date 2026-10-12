@@ -667,6 +667,8 @@ int append_benchmark_to_json(
         snprintf(version_key, sizeof(version_key), "3_gpu_reduce");
     else if (version == 4)
         snprintf(version_key, sizeof(version_key), "4_gpu_reduce_batch");
+    else if (version == 5)
+        snprintf(version_key, sizeof(version_key), "5_batch_async");
     else {
         fprintf(stderr, "nome lista json sbagliato, lato codice");
         cJSON_Delete(root);

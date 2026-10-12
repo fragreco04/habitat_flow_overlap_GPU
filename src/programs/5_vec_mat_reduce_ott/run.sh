@@ -2,8 +2,8 @@
 set -euo pipefail
 
 EXECUTABLE="./overlap_vec_mat_reduce_batch"
-DATA_BASE="../data"
-TEST_BASE="../testing"
+DATA_BASE="../../../data"
+TEST_BASE="../../../testing"
 
 CONFIGS=("1_1" "4_4" "8_8")
 SIZES=("small" "medium" "large")

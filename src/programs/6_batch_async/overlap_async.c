@@ -391,7 +391,7 @@ int main(int argc, char *argv[]) {
         double json_d2h = (double)total_read_ns * 1.0e-6;
         double json_effective_bw = effective_bw;
         double json_useful_threads = conf_final.useful_threads;
-        int version = 4;
+        int version = 5;
     
         if (is_warm_up != 1) {
             if (append_benchmark_to_json(json_filepath, version, vec, json_kernel, json_h2d, json_d2h, ms_total_cpu, json_effective_bw, json_useful_threads) == 0) {

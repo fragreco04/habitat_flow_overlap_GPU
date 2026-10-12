@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Parametri generali ed eseguibile
 EXECUTABLE="./overlap_cpu_mat"
-DATA_BASE_DIR="../data"
-TESTING_BASE_DIR="../testing"
+DATA_BASE_DIR="../../../data"
+TESTING_BASE_DIR="../../../testing"
 
 # Configurazioni di test
 GRID_TYPES=("1_1" "4_4" "8_8")
