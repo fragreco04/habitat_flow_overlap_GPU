@@ -169,29 +169,33 @@ int main(int argc, char *argv[]) {
 
     double ms_preprocessing = cpu_timer_stop_ms(pre_processing_timer);
 
-    // Memoria Host Pinned (Solo per Matrici Massicce)
+    // Memoria Host Pinned
     cl_mem p_hab = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, n * memsize_dev, NULL, &err);
     u_char *h_all_habitats = clEnqueueMapBuffer(queues[0], p_hab, CL_TRUE, CL_MAP_WRITE, 0, n * memsize_dev, 0, NULL, NULL, &err);
 
     cl_mem p_flow = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_ALLOC_HOST_PTR, m * memsize_dev, NULL, &err);
     u_char *h_all_flows = clEnqueueMapBuffer(queues[0], p_flow, CL_TRUE, CL_MAP_WRITE, 0, m * memsize_dev, 0, NULL, NULL, &err);
 
+    // Riempiamo i vettori host habitat e flow allineati con il padding (e zero le altre posizioni)
     for (size_t i = 0; i < n; ++i) 
         memcpy(h_all_habitats + (i * nels_pad), habi_raster[i]->data, memsize_host);
     for (size_t j = 0; j < m; ++j) 
         memcpy(h_all_flows + (j * nels_pad), flow_raster[j]->data, memsize_host);
 
-    // FIX INTEL DRIVER: Sostituzione dei buffer mappati con malloc standard per gli array minuscoli di output
+    // Qui l'host riceverà i conteggi di h e overlap calcolati dalla GPU
     cl_uint *h_counts[2];
     for (int i = 0; i < 2; ++i) {
         h_counts[i] = malloc(n_batch * m_batch * 2 * sizeof(cl_uint));
-        if (!h_counts[i]) { fprintf(stderr, "Error: h_counts allocation\n"); exit(12); }
+        if (!h_counts[i]) { 
+            fprintf(stderr, "Error: h_counts allocation\n");
+            exit(12);
+        }
     }
 
     // Memoria Device Double Buffered
     cl_mem d_habitats = clCreateBuffer(ctx, CL_MEM_READ_ONLY, n_batch * memsize_dev, NULL, &err);
-    cl_mem d_flows[2];  
-    cl_mem d_counts[2];
+    cl_mem d_flows[2];      // Due buffer GPU che conterranno le matrici flow, utilizziamo questi per il double buffering
+    cl_mem d_counts[2];     // GPU: conterrà i risultati (ovvero i conteggi)
     for (int i = 0; i < 2; ++i) {
         d_flows[i] = clCreateBuffer(ctx, CL_MEM_READ_ONLY, m_batch * memsize_dev, NULL, &err);
         d_counts[i] = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, n_batch * m_batch * 2 * sizeof(cl_uint), NULL, &err);
@@ -206,42 +210,49 @@ int main(int argc, char *argv[]) {
     cl_event kernel_evts[2] = {NULL, NULL};
     cl_event read_evts[2] = {NULL, NULL};
 
-    bool has_data[2] = {false, false};
-    size_t track_h[2], track_f[2], track_n[2], track_m[2];
+    bool has_data[2] = {false, false};      // Flag: è true se il ramo q ha un elaborazione sulla GPU che deve ancora essere letta dall'host
+    size_t track_h[2];                      // Memorizza l'indice globale di partenza delle matrici habitat (h_idx) assegnate a quella specifica coda.
+    size_t track_f[2];
+    size_t track_n[2];                      // Memorizza il numero effettivo di habitat (curr_n) contenuti nel batch elaborato in quel momento.
+    size_t track_m[2];
 
-    cl_ulong total_write_hab_ns = 0, total_write_flow_ns = 0;
-    cl_ulong total_kernel_ns = 0, total_read_ns = 0;
+    cl_ulong total_write_hab_ns = 0;
+    cl_ulong total_write_flow_ns = 0;
+    cl_ulong total_kernel_ns = 0;
+    cl_ulong total_read_ns = 0;
     double ms_total_cpu = 0.0;
     
     GPU_Conf conf_final;
 
     // Esecuzione Tiling 2D Pipelined
-    size_t h_idx = 0;
+    size_t h_idx = 0;       // Quale matrice h stiamo trattando
     while (h_idx < n) {
         size_t curr_n = (n - h_idx < n_batch) ? (n - h_idx) : n_batch;
         
-        err = clEnqueueWriteBuffer(queues[0], d_habitats, CL_FALSE, 0, curr_n * memsize_dev, 
-                                  h_all_habitats + (h_idx * nels_pad), 0, NULL, &hab_write_evt);
+        err = clEnqueueWriteBuffer(queues[0], d_habitats, CL_FALSE, 0, curr_n * memsize_dev, h_all_habitats + (h_idx * nels_pad), 0, NULL, &hab_write_evt);
         ocl_check(err, "write habitats chunk");
 
         size_t f_idx = 0;
-        int step = 0;
+        int step = 0;   // Contatore del batch di flussi nel ciclo interno
         
         while (f_idx < m) {
             size_t curr_m = (m - f_idx < m_batch) ? (m - f_idx) : m_batch;
-            int q = step % 2;
+            int q = step % 2;   // Indica a quale coda ci stiamo riferendo, alterna, lo step aumenta alla fine del ciclo internoS
 
+            // Ritiro del risultato precedente, Se la coda a cui ci stiamo riferendo ha elaborazioni in corso
             if (has_data[q]) {
+                // Attendiamo che la GPU ha finito la lettura precedente, d_counts[q] deve avere dei valori
                 clWaitForEvents(1, &read_evts[q]);
                 
                 total_write_flow_ns += runtime_ns(flow_write_evts[q]);
-                total_kernel_ns     += runtime_ns(kernel_evts[q]);
-                total_read_ns       += runtime_ns(read_evts[q]);
+                total_kernel_ns += runtime_ns(kernel_evts[q]);
+                total_read_ns += runtime_ns(read_evts[q]);
 
+                // La CPU calcola il valore finale e popola l'overlap matrix
                 CpuTimer cpu_timer = cpu_timer_start();
-                for (size_t local_h = 0; local_h < track_n[q]; ++local_h) {
-                    for (size_t local_f = 0; local_f < track_m[q]; ++local_f) {
-                        size_t global_h = track_h[q] + local_h;
+                for (size_t local_h = 0; local_h < track_n[q]; ++local_h) {         // track_n[q], il num di matrici h che ha elaborato in quella coda
+                    for (size_t local_f = 0; local_f < track_m[q]; ++local_f) {     // track_m[q], il num di matrici f che ha elaborato in quella coda
+                        size_t global_h = track_h[q] + local_h;                     // track_h[q], da quale matrice stiamo partendo, in base alla coda q precedente
                         size_t global_f = track_f[q] + local_f;
                         size_t pair_idx_local = local_h * track_m[q] + local_f;
                         size_t pair_idx_global = global_h * m + global_f;
@@ -266,42 +277,43 @@ int main(int argc, char *argv[]) {
             track_m[q] = curr_m;
             has_data[q] = true;
 
-            err = clEnqueueWriteBuffer(queues[q], d_flows[q], CL_FALSE, 0, curr_m * memsize_dev, 
-                                      h_all_flows + (f_idx * nels_pad), 0, NULL, &flow_write_evts[q]);
+            // Scriviamo sulla VRAM le curr_m matrici flow
+            err = clEnqueueWriteBuffer(queues[q], d_flows[q], CL_FALSE, 0, curr_m * memsize_dev, h_all_flows + (f_idx * nels_pad), 0, NULL, &flow_write_evts[q]);
             
+            // Filliamo  con degli zeri i buffer di output
             cl_uint zero = 0;
-            err = clEnqueueFillBuffer(queues[q], d_counts[q], &zero, sizeof(cl_uint), 0, 
-                                      curr_n * curr_m * 2 * sizeof(cl_uint), 0, NULL, &fill_evts[q]);
+            err = clEnqueueFillBuffer(queues[q], d_counts[q], &zero, sizeof(cl_uint), 0, curr_n * curr_m * 2 * sizeof(cl_uint), 0, NULL, &fill_evts[q]);
 
+            // Ricalcoliamo la griglia di calcolo
             GPU_Conf conf_batch = base_conf;
             conf_batch.gws[1] = curr_n * curr_m;
             conf_final = conf_batch; 
 
+            // Sappiamo che gli habitat vengono scritti sempre per primi, sulla coda 0 all'inizio del ciclo while esterno
             cl_uint num_wait = (q == 1) ? 1 : 0;
             cl_event *wait_ptr = (q == 1) ? &hab_write_evt : NULL;
 
-            kernel_evts[q] = overlap(queues[q], overlap_k[q], d_habitats, d_flows[q], 
-                                     num_vectors, (cl_uint)curr_m, d_counts[q], 
-                                     conf_batch.lws, conf_batch.gws, num_wait, wait_ptr);
+            kernel_evts[q] = overlap(queues[q], overlap_k[q], d_habitats, d_flows[q], num_vectors, (cl_uint)curr_m, d_counts[q], conf_batch.lws, conf_batch.gws, num_wait, wait_ptr);
 
-            err = clEnqueueReadBuffer(queues[q], d_counts[q], CL_FALSE, 0, 
-                                      curr_n * curr_m * 2 * sizeof(cl_uint), 
-                                      h_counts[q], 0, NULL, &read_evts[q]);
+            // Leggiamo i risultati del kernel
+            err = clEnqueueReadBuffer(queues[q], d_counts[q], CL_FALSE, 0, curr_n * curr_m * 2 * sizeof(cl_uint),h_counts[q], 0, NULL, &read_evts[q]);
             ocl_check(err, "read d_counts chunk");
 
-            f_idx += curr_m;
+            f_idx += curr_m;    // Aggiungiamo i batch m che abbiiamo elaborato
             step++;
         }
 
-        // Svuotamento della coda di fine blocco
+        // Questo batch di habitat ha finito di lavorare su tutti i flow
+        // Adesso svuotiamo le due code, se abbiamo altri habitat si ricomincia da capo
         for (int q = 0; q < 2; ++q) {
             if (has_data[q]) {
                 clWaitForEvents(1, &read_evts[q]);
                 
                 total_write_flow_ns += runtime_ns(flow_write_evts[q]);
-                total_kernel_ns     += runtime_ns(kernel_evts[q]);
-                total_read_ns       += runtime_ns(read_evts[q]);
+                total_kernel_ns += runtime_ns(kernel_evts[q]);
+                total_read_ns += runtime_ns(read_evts[q]);
 
+                // Lo stesso CPU post-processing precedente
                 CpuTimer cpu_timer = cpu_timer_start();
                 for (size_t local_h = 0; local_h < track_n[q]; ++local_h) {
                     for (size_t local_f = 0; local_f < track_m[q]; ++local_f) {
