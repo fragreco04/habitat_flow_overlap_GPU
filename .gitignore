@@ -3,3 +3,4 @@ data/
 
 .vscode/
 .git_token
+.gitignore
